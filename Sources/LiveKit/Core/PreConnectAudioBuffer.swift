@@ -26,6 +26,12 @@ public final class PreConnectAudioBuffer: NSObject, Sendable, Loggable {
         public static let maxSize = 10 * 1024 * 1024 // 10MB
         public static let sampleRate = 24000
         public static let timeout: TimeInterval = 10
+
+        /// How long ``sendAudioData(to:agents:on:)`` waits for the recorder track's
+        /// sid to be assigned by the publish ack before sending without it.
+        public static let trackSidTimeout: TimeInterval = 5
+        /// Interval between track sid availability checks.
+        static let trackSidPollInterval: TimeInterval = 0.02
     }
 
     /// The default data topic used to send the audio buffer.
@@ -137,12 +143,23 @@ public final class PreConnectAudioBuffer: NSObject, Sendable, Loggable {
             throw LiveKitError(.invalidState, message: "Audio stream is nil")
         }
 
+        // The recorder's track only receives its sid once the publish is acked by
+        // the server (`LocalParticipant.add(publication:)`). The agent can reach
+        // `.active` before that ack lands — on a slow publish (e.g. Bluetooth HFP
+        // mic warm-up) — and this send is one-shot, so stamping the sid eagerly
+        // would emit `trackId: ""` with no chance to correct it. Agents discard a
+        // buffer they can't correlate to a track, so wait for the sid first.
+        let trackId = await waitForTrackSid(of: recorder)
+        if trackId == nil {
+            log("Track sid unavailable after \(Constants.trackSidTimeout)s, sending without trackId", .warning)
+        }
+
         let streamOptions = StreamByteOptions(
             topic: topic,
             attributes: [
                 "sampleRate": "\(recorder.sampleRate)",
                 "channels": "\(recorder.channels)",
-                "trackId": recorder.track.sid?.stringValue ?? "",
+                "trackId": trackId ?? "",
             ],
             destinationIdentities: agents,
         )
@@ -161,6 +178,25 @@ public final class PreConnectAudioBuffer: NSObject, Sendable, Loggable {
         try await writer.close()
 
         log("Sent \(recorder.duration(sentSize))s = \(sentSize / 1024)KB of audio data to \(agents.count) agent(s) \(agents)", .info)
+    }
+
+    /// Poll for the recorder track's sid until it is assigned by the publish ack.
+    /// - Returns: The sid, or `nil` if it did not arrive within
+    /// ``Constants/trackSidTimeout`` (or the task was cancelled).
+    private func waitForTrackSid(of recorder: LocalAudioTrackRecorder) async -> String? {
+        if let sid = recorder.track.sid?.stringValue { return sid }
+
+        let sleepNanos = UInt64(Constants.trackSidPollInterval * Double(NSEC_PER_SEC))
+        let deadline = Date().addingTimeInterval(Constants.trackSidTimeout)
+        while Date() < deadline {
+            do {
+                try await Task.sleep(nanoseconds: sleepNanos)
+            } catch {
+                return recorder.track.sid?.stringValue // cancelled
+            }
+            if let sid = recorder.track.sid?.stringValue { return sid }
+        }
+        return nil
     }
 }
 
