@@ -177,7 +177,7 @@ public final class PreConnectAudioBuffer: NSObject, Sendable, Loggable {
         }
         try await writer.close()
 
-        log("Sent \(recorder.duration(sentSize))s = \(sentSize / 1024)KB of audio data to \(agents.count) agent(s) \(agents)", .info)
+        log("Sent \(recorder.duration(sentSize))s = \(sentSize / 1024)KB of audio data to \(agents.count) agent(s) \(agents) trackId: \(trackId ?? "<none>")", .info)
     }
 
     /// Poll for the recorder track's sid until it is assigned by the publish ack.
